@@ -92,6 +92,13 @@
         "stack": "cpp",
         "profile_v1.skel.h": "c",
         "profile.h": "c",
-        "maps.bpf.h": "c"
+        "maps.bpf.h": "c",
+        "log.h": "c",
+        "trace_helpers.h": "c",
+        "stdlib.h": "c",
+        "uprobe_helpers.h": "c",
+        "stdbool.h": "c",
+        "limits.h": "c",
+        "btf.h": "c"
     }
 }

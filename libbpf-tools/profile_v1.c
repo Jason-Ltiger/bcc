@@ -22,8 +22,9 @@
 #include <sys/types.h>
 #include "profile.h"
 #include "profile_v1.skel.h"
-#include "trace_helpers.h"
 #include "log.h"
+#include "trace_helpers.h"
+
 
 #define OPT_PERF_MAX_STACK_DEPTH	1 /* --perf-max-stack-depth */
 #define OPT_STACK_STORAGE_SIZE		2 /* --stack-storage-size */
@@ -32,7 +33,7 @@
 #define INTERVAL		8
 #define START_AFTER		9
 #define OUTPUT_DIR		10
-
+#define LOAD_NUM		11
 
 
 #define SYM_INFO_LEN			2048
@@ -96,6 +97,7 @@ struct pthread_st {
 	bool changes_v;
 	FILE *err_fp;
 	FILE *info_fp;
+	bool need_loading;
 	char cur_info_file_path[PATH_BYTES_128];
 } p_st;
 
@@ -120,6 +122,7 @@ static struct env {
 	int second;
 	int startafter;
 	char* output_file;
+	int load_num;
 } env = {
 	.stack_storage_size = 1024,
 	.perf_max_stack_depth = 127,
@@ -171,6 +174,7 @@ static const struct argp_option opts[] = {
 	{ "interval", INTERVAL, "INTERVAL", 0, "intervals between logs", 0 },
 	{ "start-after", START_AFTER, "START-AFTER", 0, "how long to collect data", 0 },
 	{ "output-dir", OUTPUT_DIR, "OUTPUT-DIR", 0, "output file dir", 0 },
+	{ "load-num", LOAD_NUM, "load-num", 0, "wait to load sysms", 0 },
 	{},
 };
 
@@ -629,6 +633,17 @@ void transtime_bcclog(char* des, char* str) {
     	tm_info->tm_sec);
 }
 
+
+void init_log() {
+  char filename[PATH_BYTES_128] = {}; 
+  transtime(filename, env.output_file ,"glog_err","log");
+  set_log_file(filename);
+  set_log_level(DEBUG);
+//   p_st.info_fp = freopen(filename, "a+", stderr);
+//   fprintf(stderr,"init std err to log ok\n");
+//   fflush(p_st.info_fp);
+}
+
 int init_resource(int stacks_fd, int counts_fd, int countsback_fd, int changes_fd, 
 	int usr_map_fd, int stacksback_fd) {
   p_st.exit_flag = false;
@@ -643,11 +658,8 @@ int init_resource(int stacks_fd, int counts_fd, int countsback_fd, int changes_f
   p_st.stacksback_fd = stacksback_fd;
   p_st.err_fp = NULL;
   p_st.info_fp = NULL;
+  p_st.need_loading = true;
 
-  char filename[PATH_BYTES_128] = {}; 
-  transtime(filename, env.output_file ,"glog_err","log");
-  set_log_file(filename);
-  set_log_level(DEBUG);
   memset(p_st.cur_info_file_path, 0 ,sizeof(p_st.cur_info_file_path));
 
   LOG_INFO("init resource has completed.");
@@ -675,10 +687,11 @@ void destroy_resource() {
 //   fprintf(stderr, "thread mutex conditon resource recycle\n");
 
   if (p_st.err_fp != NULL) {
-	  fclose(p_st.err_fp);
+	fclose(p_st.err_fp);
   }
   if (p_st.info_fp != NULL) {
-	  fclose(p_st.info_fp);
+	fflush(p_st.info_fp);
+	fclose(p_st.info_fp);
   }
 
   struct stat file_stat;
@@ -912,6 +925,7 @@ void main_process() {
 	if (i % env.interval == 0) {
 	
 		if (NULL != p_st.info_fp) {
+			fflush(p_st.info_fp);
 			fclose(p_st.info_fp);
 			gzip_file(p_st.cur_info_file_path);
 		}
@@ -926,7 +940,7 @@ void main_process() {
 	char bcc_profile[] = "bcc_profile : ";
 	transtime_bcclog(bcc_profile_stamp, bcc_profile);
 	fprintf(p_st.info_fp, "%s\n", bcc_profile_stamp);
-
+	
 	// choose map
     if(!p_st.changes_v) {
 		LOG_INFO("choose counts map and stacks");
@@ -946,6 +960,28 @@ void main_process() {
 			if (0 != ret_clear) {
 				LOG_ERROR("stacks_fd clear falied");
 				break;
+			}
+
+			if(true == p_st.need_loading) {
+				
+				if (map_exists_item(p_st.countsback_fd) == 0 && stackmap_exists_item(p_st.stacksback_fd) == 0) {
+					int ret_clear = clear_counts(p_st.countsback_fd);
+					if (0 != ret_clear) {
+						LOG_ERROR("countsback_fd clear falied");
+					}
+					ret_clear = clear_stacks(p_st.stacksback_fd);
+					if (0 != ret_clear) {
+						LOG_ERROR("countsback_fd clear falied");
+					}
+				}
+				p_st.need_loading = false;
+				fflush(p_st.info_fp);
+				int fd = fileno(p_st.info_fp);
+				if (ftruncate(fd, 0) == -1) {
+        			LOG_ERROR("ftruncate failed");
+    			}
+				LOG_INFO("loading syms over");
+
 			}
 		}
 
@@ -970,6 +1006,8 @@ void main_process() {
 			}	
 		}
 	}
+	
+	fflush(p_st.info_fp); // 确保数据立即写入文件
 	++i;
   }
 
@@ -999,6 +1037,8 @@ int main(int argc, char **argv)
 		LOG_ERROR("user_stacks_only and kernel_stacks_only cannot be used together.");
 		return 1;
 	}
+
+	init_log();
 
 	libbpf_set_print(libbpf_print_fn);
 
@@ -1066,12 +1106,17 @@ int main(int argc, char **argv)
 		}
 	}
 
+
+	LOG_INFO("begin to load kallsyms");
+
 	ksyms = ksyms__load();
 	if (!ksyms) {
 		LOG_ERROR("failed to load kallsyms");
 		// fprintf(stderr, "failed to load kallsyms\n");
 		goto cleanup;
 	}
+
+	LOG_INFO("load kallsyms success");
 
 	syms_cache = syms_cache__new(0);
 	if (!syms_cache) {
@@ -1158,9 +1203,8 @@ cleanup:
 	return err != 0;
 }
 
-
 /* how to excute
-* sudo ./profile_v1 --output-dir ~/future/bcc/libbpf-tools/ -f -U -F 99 --interval 150 --start-after 1  --stack-storage-size 4096 -p 14927,15003 
+* sudo ./profile_v1 --output-dir ~/future/bcc/libbpf-tools/ -f -F 199 --interval 150 --start-after 1  --stack-storage-size 4096  --load-num 10 -p 14927,15003 
 */
 
 /* how to parse

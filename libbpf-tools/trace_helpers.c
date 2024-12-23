@@ -22,6 +22,7 @@
 #include <limits.h>
 #include "trace_helpers.h"
 #include "uprobe_helpers.h"
+#include "log.h"
 
 #define min(x, y) ({				\
 	typeof(x) _min1 = (x);			\
@@ -111,6 +112,9 @@ struct ksyms *ksyms__load(void)
 	if (!ksyms)
 		goto err_out;
 
+
+	static int count = 0;
+
 	while (true) {
 		ret = fscanf(f, "%lx %c %s%*[^\n]\n",
 			     &sym_addr, &sym_type, sym_name);
@@ -120,6 +124,12 @@ struct ksyms *ksyms__load(void)
 			goto err_out;
 		if (ksyms__add_symbol(ksyms, sym_name, sym_addr))
 			goto err_out;
+
+	   
+		if (count % 5000 == 0) {
+			usleep(100000); 
+		}
+		++count;
 	}
 
 	/* now when strings are finalized, adjust pointers properly */
@@ -457,6 +467,8 @@ static int dso__add_syms(struct dso *dso, Elf *e, Elf_Scn *section,
 		if (data->d_size % symsize)
 			return -1;
 
+		int count = 0;
+
 		for (i = 0; i < symcount; ++i) {
 			const char *name;
 			GElf_Sym sym;
@@ -473,6 +485,11 @@ static int dso__add_syms(struct dso *dso, Elf *e, Elf_Scn *section,
 
 			if (dso__add_sym(dso, name, sym.st_value, sym.st_size))
 				goto err_out;
+				   
+			if (count % 100 == 0) {
+				usleep(10000); 
+			}
+			++count;
 		}
 	}
 
@@ -617,10 +634,12 @@ static int dso__load_sym_table(struct dso *dso)
 		return -1;
 	if (dso->type == PERF_MAP)
 		return dso__load_sym_table_from_perf_map(dso);
-	if (dso->type == EXEC || dso->type == DYN)
+	if (dso->type == EXEC || dso->type == DYN){
 		return dso__load_sym_table_from_elf(dso, 0);
-	if (dso->type == VDSO)
+	}	
+	if (dso->type == VDSO) {
 		return dso__load_sym_table_from_vdso_image(dso);
+	}
 	return -1;
 }
 
@@ -695,6 +714,7 @@ struct syms *syms__load_file(const char *fname)
 
 		if (syms__add_dso(syms, &map, name))
 			goto err_out;
+		usleep(1000);
 	}
 
 	fclose(f);
